@@ -1,0 +1,47 @@
+import modal
+import gradio as gr
+from typing import List, Tuple
+
+app = modal.App("deepseek-chat-h100")
+
+CUDA_VER = "12.1"                         # runtime image + wheel must match
+BASE_IMG = f"nvidia/cuda:{CUDA_VER}-runtime-ubuntu22.04"
+
+# ── Build one image that already has CUDA libs ──
+IMAGE = (
+    modal.Image.from_registry(BASE_IMG, add_python="3.10")   # adds Python + pip
+    .pip_install(
+        # pre-compiled wheel for CUDA 12.1 (no build needed)
+        "vllm-cu121==0.4.2",
+        # PyTorch 2.3 with CUDA 12.1 wheels
+        "torch==2.3.0+cu121", "torchvision==0.18.0+cu121",
+        "--extra-index-url", "https://download.pytorch.org/whl/cu121",
+        # the rest
+        "transformers", "gradio"
+    )
+)
+
+# ── GPU function ─────────────────────────────────
+@app.function(gpu="H100", timeout=900, image=IMAGE)
+def run_llm(prompt: str) -> str:
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(model="deepseek-ai/deepseek-llm-67b-chat", dtype="float16")
+    out = llm.generate(prompt, SamplingParams(max_tokens=512, temperature=0.7))
+    return out[0].outputs[0].text.strip()
+
+# ── Local Gradio chat ────────────────────────────
+@app.local_entrypoint()
+def main():
+    def respond(user, history: List[Tuple[str, str]] | None):
+        history = history or []
+        # keep last 4 turns
+        history = history[-4:]
+        transcript = "".join(
+            f"User: {u}\nAssistant: {a}\n" for u, a in history
+        ) + f"User: {user}\nAssistant:"
+        reply = run_llm.remote(transcript)
+        history.append((user, reply))
+        return history, history
+
+    gr.ChatInterface(respond, title="DeepSeek-67B Chat").launch()
